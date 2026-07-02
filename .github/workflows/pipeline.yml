@@ -1,0 +1,166 @@
+name: PulseOps CI/CD Pipeline
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'terraform/**'
+      - 'app/**'
+      - 'lambda/**'
+      - '.github/workflows/**'
+  push:
+    branches: [ main ]
+    paths:
+      - 'terraform/**'
+      - 'app/**'
+      - 'lambda/**'
+      - '.github/workflows/**'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ==========================================
+  # 1. VERIFY JOB - Runs on Pull Requests
+  # ==========================================
+  verify:
+    name: Verify (PR Test)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./terraform
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -no-color -out=tfplan
+          terraform show -no-color tfplan > plan_output.txt
+
+      - name: Post Plan to PR Comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Read plan output and post it as PR comment
+          PLAN_CONTENT=$(cat plan_output.txt)
+          COMMENT_BODY=$(cat <<EOF
+          ### 📝 Terraform Plan Output
+          \`\`\`terraform
+          $PLAN_CONTENT
+          \`\`\`
+          EOF
+          )
+          
+          # Use standard GitHub CLI to comment on PR
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
+
+  # ==========================================
+  # 2. DEPLOY JOB - Deploys Infrastructure to AWS
+  # ==========================================
+  deploy:
+    name: Deploy Infrastructure (Terraform Apply)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production # Triggers manual approval gate in GitHub Environments
+    defaults:
+      run:
+        working-directory: ./terraform
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+
+  # ==========================================
+  # 3. BUILD, PUSH & REFRESH JOB - Rolls out code updates
+  # ==========================================
+  build-and-refresh:
+    name: Build, Push & ASG Refresh
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [ deploy ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, Tag, and Push Docker image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: pulseops-app
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build ECR image with SHA tag and latest tag
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest ./app
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Trigger ASG Instance Refresh
+        run: |
+          # Resolve ASG Name dynamically by prefix
+          echo "Resolving ASG name..."
+          ASG_NAME=$(aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?starts_with(AutoScalingGroupName, 'pulseops-asg-')].AutoScalingGroupName" --output text | tr '\t' '\n' | head -n 1)
+          
+          if [ -z "$ASG_NAME" ]; then
+            echo "❌ Error: Could not resolve ASG name with prefix 'pulseops-asg-'"
+            exit 1
+          fi
+          
+          echo "✅ Found ASG: $ASG_NAME"
+          echo "Triggering instance refresh..."
+          
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --preferences "MinHealthyPercentage=50,InstanceWarmup=120" \
+            --query "InstanceRefreshId" --output text)
+            
+          echo "🚀 Instance Refresh triggered successfully! ID: $REFRESH_ID"

@@ -1,0 +1,52 @@
+name: PulseOps Infrastructure Teardown (Destroy)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type 'destroy' to confirm termination of the entire infrastructure stack"
+        required: true
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    environment: production # Enforces manual approval gate (required reviewers)
+    defaults:
+      run:
+        working-directory: ./terraform
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Verify Teardown Confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "destroy" ]; then
+            echo "❌ Error: Confirmation string was not 'destroy'. Teardown aborted."
+            exit 1
+          fi
+          echo "✅ Confirmation string matched 'destroy'. Proceeding with infrastructure teardown..."
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: |
+          # Note: Backend S3 bucket configuration will be initialized dynamically
+          terraform init
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve
