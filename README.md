@@ -20,8 +20,8 @@ graph TD
             
             subgraph Public Subnets [Public Subnets - 2 AZs]
                 ASG[Auto Scaling Group]
-                EC2_1[EC2 Instance 1 (Public IP)]
-                EC2_2[EC2 Instance 2 (Public IP)]
+                EC2_1["EC2 Instance 1 (Public IP)"]
+                EC2_2["EC2 Instance 2 (Public IP)"]
             end
         end
 
@@ -79,6 +79,11 @@ This project is engineered to work 100% within the **AWS Free Tier (12-Month Fre
 - **Custom Health Poller**: Since there is no ALB to execute health checks, we deploy an **EventBridge Scheduled Lambda** that runs once per minute to poll each instance's `/health` endpoint and emit a custom CloudWatch metric `HealthCheckFailed`. This stays well within the 1,000,000 free Lambda requests/month.
 - **SSM Parameter Store**: We enforce **Standard Tier** parameter types which are 100% free (Advanced parameter tiers carry charges).
 - **ECR Lifecycle Rules**: ECR storage is limited to 500MB free per month. We deploy a lifecycle policy that automatically deletes untagged/old builds, retaining only the latest 3 builds to ensure we stay under the storage limit.
+- **Instance Type**: Free Tier-eligible instance types vary by account and region. Before deploying, verify which types are eligible for yours:
+  ```bash
+  aws ec2 describe-instance-types --filters "Name=free-tier-eligible,Values=true" --query "InstanceTypes[].InstanceType" --output table --region us-east-1
+  ```
+  `t3.micro` is commonly eligible on newer accounts where `t2.micro` is not — update `instance_type` in `terraform/variables.tf` accordingly if your `terraform apply` fails with a "not eligible for Free Tier" error.
 
 ### Security Tradeoffs
 1. **Public IPs and Port 5000 Exposure**: Port `5000` is open to `0.0.0.0/0` on the EC2 security group since there is no ALB to restrict inbound traffic to a load balancer. This is a deliberate tradeoff to fit the project within the AWS Free Tier for a short-lived demonstration, and is not intended for long-running production use.
@@ -122,9 +127,11 @@ This project is engineered to work 100% within the **AWS Free Tier (12-Month Fre
 
 ### Prerequisites
 1. An AWS Account.
-2. The AWS CLI installed and configured locally.
+2. The AWS CLI installed and configured locally (`aws configure`).
 3. Terraform v1.5.0+ installed locally.
-4. A Telegram Bot token (create one via `@BotFather`) and your Chat ID (retrieve via `@userinfobot`).
+4. Docker Desktop installed locally, for building and pushing the app image.
+5. The [AWS Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) installed locally — required for `aws ssm start-session` (used in the chaos test below). Verify with `session-manager-plugin` after install.
+6. A Telegram Bot token (create one via `@BotFather`) and your Chat ID (see Step 4 below).
 
 ### Step 1: Bootstrap Terraform State Backend
 Before running the main infrastructure, we need to create the S3 bucket and DynamoDB table where the state files will be securely stored.
@@ -155,17 +162,22 @@ In your Github Repository, navigate to **Settings > Secrets and Variables > Acti
 2. Click **New Environment** and name it `production`.
 3. Check **Required reviewers** and add yourself. This creates the manual approval gate before running `terraform apply`.
 
+> **Note:** On the GitHub free plan, the **Required reviewers** protection rule is only available on **public repositories** (private repos require GitHub Pro/Team/Enterprise). If your repo is private and you don't see this option, either make the repo public or rely on manually triggering workflow runs via `workflow_dispatch` as your approval step instead.
+
 ### Step 4: Add Telegram Credentials
-To deploy successfully without exposing secrets, you can either:
-- Supply them during local deployment:
-  Add variables to your `terraform.tfvars` file:
-  ```hcl
-  telegram_bot_token = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
-  telegram_chat_id   = "987654321"
-  ```
-- Or write them directly into AWS SSM Parameter Store manually (they are set to be ignored in subsequent Terraform runs):
-  - `/pulseops/telegram/bot_token` (SecureString)
-  - `/pulseops/telegram/chat_id` (String)
+Create a bot via [@BotFather](https://t.me/BotFather) (`/newbot`), message it once, then retrieve your chat ID:
+```bash
+curl "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates"
+```
+Look for the `"chat":{"id":...}` field in the response.
+
+**Recommended:** write the credentials directly into SSM Parameter Store as SecureString values. This keeps secrets out of local files and Terraform state entirely:
+```bash
+aws ssm put-parameter --name "/pulseops/telegram/bot_token" --value "<YOUR_BOT_TOKEN>" --type SecureString --overwrite --region us-east-1
+aws ssm put-parameter --name "/pulseops/telegram/chat_id" --value "<YOUR_CHAT_ID>" --type SecureString --overwrite --region us-east-1
+```
+
+Alternatively, they can be supplied as Terraform variables at apply-time (e.g. via `terraform.tfvars`), but this risks the token ending up in a local file or shell history — the SSM route above is safer and is what this project uses.
 
 ### Step 5: Initial Deploy
 To perform the initial deploy (which builds infrastructure and creates the ECR repository):
