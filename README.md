@@ -254,6 +254,8 @@ The full self-healing loop was confirmed working end-to-end, twice, in a single 
 | 11:29:00 | Action successfully executed → `pulseops-alarms` (SNS) |
 | 11:32:00 | `In alarm` → `OK` |
 
+![CloudWatch alarm history showing repeated ALARM/OK transitions and successful SNS actions](docs/chaos-test-evidence/cloudwatch-alarm-history.png)
+
 **Telegram remediation alert** — delivered by the Remediator Lambda within seconds of the alarm firing:
 ```text
 🚨 PulseOps Self-Healing Remediation Report 🚨
@@ -270,6 +272,8 @@ was greater than or equal to the threshold (1.0).
 Refresh ID: ee7c4314-57a5-4734-891d-0186af24901b
 ```
 
+![Telegram remediation alert delivered by the self-healing Lambda](docs/chaos-test-evidence/telegram-remediation-alert.png)
+
 **Auto Scaling Group activity** — confirmed rolling replacement of the unhealthy instance, with each old instance terminated and a fresh one launched pulling the latest image from ECR:
 ```text
 Terminating EC2 instance: i-03af7b7a74e264632
@@ -278,6 +282,6 @@ Launching new EC2 instance: i-0125c7eb8b353a275
   → At 2026-07-02T11:29:13Z, launched in response to an instance refresh.
 ```
 
-This confirms the entire pipeline — **poller → custom metric → alarm → SNS → remediator Lambda → ASG instance refresh → Telegram alert** — operates autonomously with zero manual intervention, and recovers correctly on repeat failures.
+![ASG activity log showing successful instance refresh terminations and launches](docs/chaos-test-evidence/asg-instance-refresh-activity.png)
 
-> Screenshots of the live run (Telegram alert, CloudWatch alarm history, ASG instance refresh activity) are included in `/docs/chaos-test-evidence/` for reference.
+This confirms the entire pipeline — **poller → custom metric → alarm → SNS → remediator Lambda → ASG instance refresh → Telegram alert** — operates autonomously with zero manual intervention, and recovers correctly on repeat failures.
