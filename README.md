@@ -234,19 +234,50 @@ This tests application-level self-healing (Flask container stops responding, but
    sudo docker stop pulseops-container
    ```
 3. **Observe the self-healing workflow**:
-   - Within 60 seconds, the Scheduled **Health Poller Lambda** will execute. It makes an HTTP request to `http://<Instance_Public_IP>:5000/health`, which will fail.
+   - Within 60 seconds, the Scheduled **Health Poller Lambda** executes, requests `http://<Instance_Public_IP>:5000/health`, and the request fails.
    - The Poller Lambda publishes custom metric `HealthCheckFailed = 1` for this instance and the ASG.
-   - The CloudWatch Alarm `pulseops-custom-health-failed` detects `HealthCheckFailed >= 1` and enters the `ALARM` state.
-   - The Alarm publishes a message to the SNS topic `pulseops-alarms`.
-   - The **Remediator Lambda** is invoked by SNS. It triggers a rolling **Instance Refresh** on the Auto Scaling Group.
-   - The Remediator Lambda fetches your Telegram credentials from the SSM Parameter Store and posts a message:
-     ```text
-     🚨 PulseOps Self-Healing Remediation Report 🚨
-     
-     Triggering Alarm: pulseops-custom-health-failed
-     Status: ALARM
-     Incident Reason: Threshold breached: HealthCheckFailed >= 1.0
-     
-     🛠️ Action Taken: Triggered rolling Instance Refresh on ASG 'pulseops-asg-xxxx'. Refresh ID: xxxx-xxxx
-     ```
-   - The ASG terminates the unhealthy instance and launches a fresh one to restore service.
+   - The CloudWatch Alarm `pulseops-custom-health-failed` detects `HealthCheckFailed >= 1` and enters the `ALARM` state, then returns to `OK` once the metric clears.
+   - The Alarm publishes a message to the SNS topic `pulseops-alarms`, which is subscribed by the **Remediator Lambda**.
+
+#### Verified Results (Live Run — July 2, 2026)
+The full self-healing loop was confirmed working end-to-end, twice, in a single live test run.
+
+**CloudWatch alarm history** — the detection loop fired and self-corrected automatically:
+
+| Time (UTC) | Event |
+|---|---|
+| 10:45:11 | Alarm `pulseops-custom-health-failed` created |
+| 10:46:00 | `Insufficient data` → `In alarm` |
+| 10:46:00 | Action successfully executed → `pulseops-alarms` (SNS) |
+| 11:06:00 | `In alarm` → `OK` |
+| 11:29:00 | `OK` → `In alarm` |
+| 11:29:00 | Action successfully executed → `pulseops-alarms` (SNS) |
+| 11:32:00 | `In alarm` → `OK` |
+
+**Telegram remediation alert** — delivered by the Remediator Lambda within seconds of the alarm firing:
+```text
+🚨 PulseOps Self-Healing Remediation Report 🚨
+
+Triggering Alarm: pulseops-custom-health-failed
+Description: This alarm triggers when the custom health check poller 
+reports any instance failure (value >= 1).
+Status: ALARM
+Incident Reason: Threshold Crossed: 1 datapoint 1.0 (02/07/26 11:28:00) 
+was greater than or equal to the threshold (1.0).
+
+🛠️ Action Taken: Triggered rolling Instance Refresh on ASG 
+'pulseops-asg-20260702104448750000000002'. 
+Refresh ID: ee7c4314-57a5-4734-891d-0186af24901b
+```
+
+**Auto Scaling Group activity** — confirmed rolling replacement of the unhealthy instance, with each old instance terminated and a fresh one launched pulling the latest image from ECR:
+```text
+Terminating EC2 instance: i-03af7b7a74e264632
+  → At 2026-07-02T11:03:36Z, taken out of service in response to an instance refresh.
+Launching new EC2 instance: i-0125c7eb8b353a275
+  → At 2026-07-02T11:29:13Z, launched in response to an instance refresh.
+```
+
+This confirms the entire pipeline — **poller → custom metric → alarm → SNS → remediator Lambda → ASG instance refresh → Telegram alert** — operates autonomously with zero manual intervention, and recovers correctly on repeat failures.
+
+> Screenshots of the live run (Telegram alert, CloudWatch alarm history, ASG instance refresh activity) are included in `/docs/chaos-test-evidence/` for reference.
