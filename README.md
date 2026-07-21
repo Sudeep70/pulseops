@@ -149,7 +149,7 @@ Before running the main infrastructure, we need to create the S3 bucket and Dyna
    ```bash
    cd ..
    ```
-4. Open [provider.tf](file:///e:/codes/pulseops/terraform/provider.tf) and replace the backend `bucket` name with the newly created bucket name.
+4. Open [`terraform/provider.tf`](terraform/provider.tf) and replace the backend `bucket` name with the newly created bucket name.
 
 ### Step 2: Configure Github Repository Secrets
 In your Github Repository, navigate to **Settings > Secrets and Variables > Actions** and create the following Repository Secrets:
